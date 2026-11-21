@@ -7,7 +7,8 @@ up the real news of 21 November 2026 and writes it to /output/entry.png
 
 No network, no file reads outside its own directory, no clock, no random.
 Text comes from a bitmap font atlas (font_data.py) generated at build time
-from DejaVu Sans; this program only ever reads that atlas.
+from DejaVu Sans at one base size and scaled to each text size at draw
+time; this program only ever reads that atlas.
 
 Stories (all happened or first reported 21 Nov 2026; sources in README):
   LEAD    Russia's biggest strikes of the year on Ukraine; missiles land
@@ -134,33 +135,80 @@ class Canvas:
 
 
 # ---- text ----------------------------------------------------------------
+# The atlas holds DejaVu Book + Bold at ONE base size (64 px). Each old
+# font key maps to (atlas weight, target pixel size); bitmaps and metrics
+# are scaled down at draw time with nearest-neighbour sampling, so the
+# atlas stays small enough for the kit's authored-lines check.
+BASE_SIZE = 64
+FONT_MAP = {
+    "MAST": ("BOLD", 62),
+    "HEAD": ("BOLD", 40),
+    "SUB": ("BOLD", 26),
+    "BODY": ("BOOK", 19),
+    "SMALL": ("BOOK", 16),
+    "SMB": ("BOLD", 16),
+    "TINY": ("BOOK", 13),
+    "TINYB": ("BOLD", 13),
+}
+
+
+def _scaled(v, size):
+    """Scale a base-size-64 metric to `size` px, truncated toward zero.
+
+    Truncation (not rounding) is deliberate: it reproduces the native-size
+    rendering's line breaks exactly, so wrapped paragraphs keep the same
+    breaks the layout was designed around.
+    """
+    n = v * size
+    if n >= 0:
+        return n // BASE_SIZE
+    return -((-n) // BASE_SIZE)
+
+
+def _scaled_up(v, size):
+    """Scale a base-size-64 bitmap extent to `size` px, rounded up.
+
+    Extents round UP, unlike metrics: truncating a glyph's height would
+    drop its bottom rows (the foot of E, the bowl of B) from the sampled
+    bitmap. Rounding up keeps every source row reachable.
+    """
+    return -((-v * size) // BASE_SIZE)
+
+
 def text_width(font_key, text):
-    font = FONTS[font_key]
+    base, size = FONT_MAP[font_key]
+    font = FONTS[base]
     total = 0
     for ch in text:
         g = font.get(ch)
         if g is None:
             g = font[" "]
-        total += g[0]
+        total += _scaled(g[0], size)
     return total
 
 
 def draw_text(cv, font_key, x, y, text, color):
     """Draw text with its top at y. Returns the width drawn."""
-    font = FONTS[font_key]
+    base, size = FONT_MAP[font_key]
+    font = FONTS[base]
     pen = x
     for ch in text:
         g = font.get(ch)
         if g is None:
             g = font[" "]
         adv, w, h, xoff, yoff, rows = g
+        sw = _scaled_up(w, size)
+        sh = _scaled_up(h, size)
+        gx = pen + _scaled(xoff, size)
+        gy = y + _scaled(yoff, size)
         if w and h:
-            for ry in range(h):
-                row = rows[ry]
-                for rx in range(w):
+            for oy in range(sh):
+                row = rows[oy * BASE_SIZE // size]
+                for ox in range(sw):
+                    rx = ox * BASE_SIZE // size
                     if row[rx // 8] & (0x80 >> (rx % 8)):
-                        cv.set(pen + xoff + rx, y + yoff + ry, color)
-        pen += adv
+                        cv.set(gx + ox, gy + oy, color)
+        pen += _scaled(adv, size)
     return pen - x
 
 
