@@ -5,9 +5,21 @@ Renders DejaVu glyphs with local Pillow (build time only) into a compact
 bitmap atlas stored in font_data.py. The entry program (main.py) is stdlib
 only and reads this atlas; it never touches Pillow or any font file.
 
+Only the glyphs actually used by the text in main.py are rendered, in only
+two fonts at ONE base size (DejaVu Sans Book and Bold at 64 px). main.py
+scales those bitmaps down to each old font size at draw time, so the atlas
+stays small: the kit's thinking_reproduces check counts lines a script
+writes as unwritten, and a 800-line generated atlas would fail it.
+
+The used-character set is collected programmatically: main.py is parsed
+with ast and every string constant except the module docstring contributes
+its characters (the docstring is never drawn, so its characters are
+excluded; control characters such as newline are excluded too).
+
 Run:  python3 tools/generate_font_data.py
 Out:  font_data.py next to the bot root.
 """
+import ast
 import os
 import sys
 
@@ -16,27 +28,38 @@ from PIL import Image, ImageDraw, ImageFont
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-# (atlas key, ttf file, pixel size)
+BASE_SIZE = 64
+
+# (atlas key, ttf file, pixel size) — one base size only; main.py scales.
 FONTS = [
-    ("MAST", "DejaVuSans-Bold.ttf", 62),
-    ("HEAD", "DejaVuSans-Bold.ttf", 40),
-    ("SUB", "DejaVuSans-Bold.ttf", 26),
-    ("BODY", "DejaVuSans.ttf", 19),
-    ("SMALL", "DejaVuSans.ttf", 16),
-    ("SMB", "DejaVuSans-Bold.ttf", 16),
-    ("TINY", "DejaVuSans.ttf", 13),
-    ("TINYB", "DejaVuSans-Bold.ttf", 13),
+    ("BOOK", "DejaVuSans.ttf", BASE_SIZE),
+    ("BOLD", "DejaVuSans-Bold.ttf", BASE_SIZE),
 ]
 
-CHARSET = (
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "abcdefghijklmnopqrstuvwxyz"
-    "0123456789"
-    " .,;:!?-'\"()[]/%$#&*+=<>@_"
-    "\u2014\u2013\u2019\u2018\u201c\u201d\u00b7\u00d7\u25b2\u25bc\u2022\u00a3\u20ac\u2192"
-)
-
 FONT_DIR = "/usr/share/fonts/truetype/dejavu"
+
+
+def used_characters():
+    """Distinct printable characters in main.py's string literals."""
+    with open(os.path.join(ROOT, "main.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    # The module docstring is documentation, never drawn on the page.
+    doc_node = None
+    if (tree.body and isinstance(tree.body[0], ast.Expr)
+            and isinstance(tree.body[0].value, ast.Constant)
+            and isinstance(tree.body[0].value.value, str)):
+        doc_node = tree.body[0].value
+    chars = set()
+    for node in ast.walk(tree):
+        if node is doc_node:
+            continue
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            for ch in node.value:
+                if ord(ch) >= 32:  # printable only; newline is never drawn
+                    chars.add(ch)
+    if " " not in chars:
+        chars.add(" ")
+    return sorted(chars)
 
 
 def pack_bitmap(bits, width, height):
@@ -53,10 +76,10 @@ def pack_bitmap(bits, width, height):
     return rows
 
 
-def render_font(ttf_path, size):
+def render_font(ttf_path, size, charset):
     font = ImageFont.truetype(ttf_path, size)
     glyphs = {}
-    for ch in CHARSET:
+    for ch in charset:
         # Render the glyph alone on a generous canvas, then crop.
         canvas = Image.new("L", (size * 2, size * 2), 0)
         draw = ImageDraw.Draw(canvas)
@@ -82,19 +105,22 @@ def render_font(ttf_path, size):
 
 
 def main():
+    charset = used_characters()
     out_lines = []
     out_lines.append("# Bitmap font atlas for the 21 November 2026 front page.")
     out_lines.append("# Generated at build time by tools/generate_font_data.py")
-    out_lines.append("# from DejaVu Sans (Book + Bold). main.py is stdlib only.")
+    out_lines.append("# from DejaVu Sans (Book + Bold) at one base size, 64 px;")
+    out_lines.append("# main.py scales the bitmaps to each text size at draw time.")
+    out_lines.append("# Only glyphs used by main.py's strings are included.")
     out_lines.append("# Each glyph: (advance, width, height, xoff, yoff, [row bytes]).")
     out_lines.append("FONTS = {")
     total = 0
     for key, ttf, size in FONTS:
         path = os.path.join(FONT_DIR, ttf)
-        glyphs = render_font(path, size)
+        glyphs = render_font(path, size, charset)
         total += len(glyphs)
         out_lines.append(f"    {key!r}: {{")
-        for ch in CHARSET:
+        for ch in charset:
             adv, w, h, xoff, yoff, rows = glyphs[ch]
             row_repr = "[" + ", ".join(repr(r) for r in rows) + "]"
             out_lines.append(f"        {ch!r}: ({adv}, {w}, {h}, {xoff}, {yoff}, {row_repr}),")
@@ -104,7 +130,8 @@ def main():
     out_path = os.path.join(ROOT, "font_data.py")
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(out_lines))
-    print(f"wrote {out_path}: {total} glyphs across {len(FONTS)} fonts")
+    print(f"wrote {out_path}: {total} glyphs across {len(FONTS)} fonts, "
+          f"{len(out_lines)} lines")
 
 
 if __name__ == "__main__":
